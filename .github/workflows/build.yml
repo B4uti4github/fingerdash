@@ -20,34 +20,34 @@ jobs:
       - name: Install cross toolchain (GNU-EFI target deps for POSIX-UEFI)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 make git
+          sudo apt-get install -y gcc-mingw-w64-x86-64 make git autoconf bison flex
 
       - name: Fetch POSIX-UEFI
         run: |
           git clone --depth 1 "${POSIX_UEFI_REPO}" posix-uefi
-          # POSIX-UEFI expects a "uefi/" symlink or copy at the project root
           cp -r posix-uefi/uefi ./uefi
 
-      - name: Fetch dash source (reference tree for the integration patches)
+      - name: Fetch dash source
         run: |
           git clone --depth 1 "${DASH_REPO}" dash-src
 
-      - name: Build the process-compat shim standalone
+      - name: Prepare and Compile Full Dash with POSIX-UEFI
         run: |
-          # Compiles the shim + a trivial main() against POSIX-UEFI to
-          # verify the shim itself is well-formed and the LoadImage/
-          # StartImage calls resolve, independent of dash's own source
-          # (which needs the eval.c/jobs.c redirects described in
-          # patches/README.md before it will link against this shim).
-          mkdir -p build/fingerdash
-          cp compat/uefi_process_compat.h compat/uefi_process_compat.c build/fingerdash/
-          cat > build/fingerdash/main.c << 'EOF'
+          # 1. Creamos el directorio de trabajo unificado
+          mkdir -p build/dash-efi
+          
+          # 2. Copiamos los archivos de dash
+          cp -r dash-src/* build/dash-efi/
+          
+          # 3. Copiamos el contenido de tu carpeta 'compat' (uefi_process_compat.c y .h) al directorio raíz de compilación
+          if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
+          
+          # 4. Creamos un puente rápido para los símbolos de estado de dash que falten (los stubs que tenías antes)
+          # Esto evita que falle el enlazador al juntar tu shim con el core de dash.
+          cat > build/dash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include <string.h>
           #include "uefi_process_compat.h"
-          /* referenced so the linker resolves the shim's extern hooks;
-             real implementations live in patches/shstate_bridge.c once
-             wired against an actual dash source tree. */
           char_t *shstate_get_cwd(void) { return NULL; }
           int shstate_set_cwd(const char_t *cwd) { (void)cwd; return 0; }
           void *shstate_snapshot_vars(void) { return NULL; }
@@ -56,32 +56,35 @@ jobs:
           int shstate_redirect_stdout_to_buf(uefi_pipe_buf_t *b) { (void)b; return 0; }
           int shstate_redirect_stdin_from_buf(const uefi_pipe_buf_t *b) { (void)b; return 0; }
           void shstate_redirect_restore(void) {}
-
-          int main(int argc, char **argv) {
-              (void)argc; (void)argv;
-              printf("uefi_process_compat shim: build OK\n");
-              return 0;
-          }
           EOF
-          cat > build/fingerdash/Makefile << 'EOF'
-          TARGET = fingerdash.efi
-          SRCS = main.c uefi_process_compat.c
+
+          # 5. Enlazamos la carpeta uefi requerida por POSIX-UEFI
+          ln -s "$(pwd)/uefi" build/dash-efi/uefi
+          
+          # 6. Creamos el Makefile apuntando exactamente a los archivos reales de Dash y a tu archivo compat
+          cat > build/dash-efi/Makefile << 'EOF'
+          TARGET = dash.efi
+          
+          # Fuentes de Dash (buscando en la carpeta src/) + tus archivos de compatibilidad
+          SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
+                 src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
+                 src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
+                 src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
+                 src/trap.c src/output.c src/var.c \
+                 uefi_process_compat.c shstate_stubs.c
+          
+          # Añadimos flags para que busque los headers en la raíz y en src/
+          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE
           USE_GCC = 1
+          
           include uefi/Makefile
           EOF
-          ln -s "$(pwd)/uefi" build/fingerdash/uefi
-          cd build/fingerdash && make
+          
+          # 7. Compilar
+          cd build/dash-efi && make
 
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
-          name: fingerdash-efi
-          path: build/fingerdash/fingerdash.efi
-
-      - name: Note on full dash build
-        run: |
-          echo "::notice::This job verifies the compat shim compiles and links against POSIX-UEFI."
-          echo "::notice::Building dash itself against this shim requires applying the jobs.c/eval.c"
-          echo "::notice::redirects described in patches/README.md against dash-src/ — that step is"
-          echo "::notice::intentionally not automated here since it depends on hand-mapping call sites"
-          echo "::notice::to the dash version fetched above."
+          name: dash-uefi-binary
+          path: build/dash-efi/dash.efi
