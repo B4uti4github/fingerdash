@@ -44,8 +44,7 @@ jobs:
           mkdir -p build/dash-efi
           cp -r dash-src/* build/dash-efi/
           
-          # ¡CRUCIAL! Borramos los archivos .o viejos compilados para Linux sin -fPIC
-          # Queremos conservar los .c y .h generados (como signames.c, builtins.c, etc.)
+          # Borramos los archivos .o viejos compilados para Linux sin -fPIC
           find build/dash-efi -name "*.o" -type f -delete
           
           # 3. Copiar tu carpeta 'compat' si existe
@@ -69,11 +68,10 @@ jobs:
           # 5. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 6. Crear el Makefile definitivo añadiendo src/signames.c y forzando la compilación limpia
+          # 6. Crear el Makefile inyectando HAVE_* directos en CFLAGS para neutralizar system.h
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
-          # Agregamos src/builtins.c y src/signames.c a la compilación nativa de UEFI
           SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
                  src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
                  src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
@@ -82,7 +80,11 @@ jobs:
                  src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC
+          # Definimos de manera explícita que ya existen las funciones conflictivas del entorno
+          # Esto bloquea las declaraciones 'static inline' duplicadas de src/system.h
+          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC \
+                   -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1
+          
           USE_GCC = 1
           
           include uefi/Makefile
