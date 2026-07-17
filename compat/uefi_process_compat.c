@@ -46,22 +46,18 @@
  */
 static efi_device_path_t *uefi_path_to_dp(const char_t *path)
 {
-    /* Count bytes we need: two nodes (filepath + end) + path string */
     size_t plen = 0;
     const char_t *p;
 
     if (!path || !*path) return NULL;
 
-    /* Compute length of path in char_t units including leading backslash */
     for (p = path; *p; p++) plen++;
 
-    /* Allocate: filepath node header (4 bytes) + NUL + end node (4 bytes) */
     size_t total = 4 + (plen + 1) * sizeof(char_t) + 4;
     uint8_t *buf = (uint8_t *)malloc(total);
     if (!buf) return NULL;
     memset(buf, 0, total);
 
-    /* Fill the MEDIA_FILEPATH node */
     efi_device_path_t *fp = (efi_device_path_t *)buf;
     fp->Type    = MEDIA_DEVICE_PATH_TYPE;
     fp->SubType = MEDIA_FILEPATH_SUBTYPE;
@@ -69,7 +65,6 @@ static efi_device_path_t *uefi_path_to_dp(const char_t *path)
     fp->Length[0] = (uint8_t)(fp_len & 0xff);
     fp->Length[1] = (uint8_t)((fp_len >> 8) & 0xff);
 
-    /* Copy path as wide chars into the node payload */
     char_t *dst = (char_t *)(buf + 4);
     dst[0] = (char_t)'\\';
     size_t i;
@@ -78,7 +73,6 @@ static efi_device_path_t *uefi_path_to_dp(const char_t *path)
     }
     dst[1 + i] = 0; /* already zeroed above, being explicit */
 
-    /* Append END_DEVICE_PATH node */
     efi_device_path_t *end = (efi_device_path_t *)(buf + fp_len + 4);
     end->Type    = END_DEVICE_PATH_TYPE;
     end->SubType = END_ENTIRE_DEVICE_PATH_SUBTYPE;
@@ -96,12 +90,12 @@ static void uefi_free_dp(efi_device_path_t *dp)
 /*
  * Marshal argv into the LoadOptions blob format UEFI expects:
  *   uint32_t  argc
- *   void     *argv[0]  (char16_t* or char* depending on UEFI_NO_UTF8)
+ *   void     *argv[0]
  *   void     *argv[1]
  *   ...
  *   NULL
  *
- * The blob is allocated with malloc(); caller frees with free().
+ * Blob is allocated with malloc(); caller frees with free().
  */
 static void *uefi_build_load_options(char_t *const argv[], uintn_t *out_size)
 {
@@ -109,7 +103,6 @@ static void *uefi_build_load_options(char_t *const argv[], uintn_t *out_size)
     char_t *const *arg;
     for (arg = argv; arg && *arg; arg++) argc++;
 
-    /* Calculate size: pointer per arg + NULL sentinel + arg strings */
     size_t ptrs_size = (size_t)(argc + 1) * sizeof(void *);
     size_t str_size  = 0;
     for (arg = argv; arg && *arg; arg++) {
@@ -121,13 +114,11 @@ static void *uefi_build_load_options(char_t *const argv[], uintn_t *out_size)
     if (!buf) return NULL;
     memset(buf, 0, total);
 
-    /* Write argc as uint32_t */
     buf[0] = (uint8_t)(argc & 0xff);
     buf[1] = (uint8_t)((argc >> 8) & 0xff);
     buf[2] = (uint8_t)((argc >> 16) & 0xff);
     buf[3] = (uint8_t)((argc >> 24) & 0xff);
 
-    /* Write pointer table, then string data after it */
     void **ptrs = (void **)(buf + 4);
     char_t *str_dst = (char_t *)(buf + 4 + ptrs_size);
     size_t offset = 0;
@@ -187,13 +178,15 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
         load_options = uefi_build_load_options(argv, &load_options_size);
         if (load_options) {
             /* OpenProtocol on the child handle to get its Loaded Image
-             * Protocol instance. POSIX-UEFI's OpenProtocol takes 5 args
-             * (no AgentHandle/ControllerHandle slots). */
-            static const efi_guid_t loaded_image_guid =
+             * Protocol instance. Pass IM as AgentHandle, NULL as
+             * ControllerHandle, and EFI_OPEN_PROTOCOL_GET_PROTOCOL so
+             * we get a direct pointer to the protocol interface. */
+            static efi_guid_t loaded_image_guid =
                 UEFI_LOADED_IMAGE_GUID_INIT;
 
             st = BS->OpenProtocol(child, &loaded_image_guid,
-                                  (void **)&li, 0);
+                                  (void **)&li, IM, NULL,
+                                  EFI_OPEN_PROTOCOL_GET_PROTOCOL);
             if (!EFI_ERROR(st) && li) {
                 li->LoadOptions     = load_options;
                 li->LoadOptionsSize = (uint32_t)load_options_size;
@@ -221,7 +214,7 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
  * ------------------------------------------------------------------ */
 
 /* These five hooks are provided by the dash integration layer
- * (patches/shstate_bridge.c); kept as weak/extern so this file
+ * (patches/shstate_bridge.c); kept as extern so this file
  * compiles standalone without dash internals. */
 extern char_t *shstate_get_cwd(void);
 extern int     shstate_set_cwd(const char_t *cwd);
@@ -350,7 +343,8 @@ int uefi_pipe_stage_feed(int (*consumer)(void *ctx), void *ctx,
 /* pipe_buf_grow is called by shstate_bridge.c via extern; silence the
  * unused-function warning during incremental builds where the bridge
  * hasn't been linked yet. */
-static void (*_unused_ref)(uefi_pipe_buf_t *, uintn_t) __attribute__((unused)) = pipe_buf_grow;
+static int (*_unused_ref)(uefi_pipe_buf_t *, uintn_t)
+    __attribute__((unused)) = pipe_buf_grow;
 
 /* ------------------------------------------------------------------ *
  *  4. Explicit-failure stubs

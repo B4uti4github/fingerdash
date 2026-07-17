@@ -43,8 +43,8 @@ jobs:
           cp compat/uefi_process_compat.h compat/uefi_process_compat.c build/shim-check/
           cat > build/shim-check/main.c << 'EOF'
           #include <uefi.h>
+          #include <string.h>
           #include "uefi_process_compat.h"
-
           /* referenced so the linker resolves the shim's extern hooks;
              real implementations live in patches/shstate_bridge.c once
              wired against an actual dash source tree. */
