@@ -8,7 +8,7 @@ on:
 
 env:
   POSIX_UEFI_REPO: https://gitlab.com/bztsrc/posix-uefi.git
-  DASH_REPO: https://github.com/tklauser/dash.git
+  OKSH_REPO: https://github.com/ibara/oksh.git
 
 jobs:
   build:
@@ -17,56 +17,31 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Install cross toolchain (GNU-EFI target deps for POSIX-UEFI)
+      - name: Install cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 make git autoconf automake bison flex gcc
+          sudo apt-get install -y gcc-mingw-w64-x86-64 make git gcc
 
       - name: Fetch POSIX-UEFI
         run: |
           git clone --depth 1 "${POSIX_UEFI_REPO}" posix-uefi
           cp -r posix-uefi/uefi ./uefi
 
-      - name: Fetch dash source
+      - name: Fetch oksh source
         run: |
-          git clone --depth 1 "${DASH_REPO}" dash-src
+          git clone --depth 1 "${OKSH_REPO}" oksh-src
 
-      - name: Prepare and Compile Full Dash with POSIX-UEFI
+      - name: Prepare and Compile oksh with POSIX-UEFI
         run: |
-          # 1. Usamos el entorno nativo estándar para generar las tablas internas (.c/.h)
-          cd dash-src
-          ./autogen.sh
-          ./configure || true
-          make || true
-          cd ..
-
-          # 2. Directorio de trabajo UEFI
-          mkdir -p build/dash-efi
-          cp -r dash-src/* build/dash-efi/
+          # 1. Crear directorio de trabajo limpio para el binario UEFI
+          mkdir -p build/oksh-efi
+          cp -r oksh-src/* build/oksh-efi/
           
-          # Borramos los archivos .o nativos de Linux
-          find build/dash-efi -name "*.o" -type f -delete
+          # 2. Copiar tu carpeta 'compat' si existe
+          if [ -d "compat" ]; then cp -r compat/* build/oksh-efi/; fi
           
-          # 3. Parches quirúrgicos a las cabeceras de dash para evitar colisiones
-          sed -i 's|#define _SC_CLK_TCK|// #define _SC_CLK_TCK|g' build/dash-efi/src/system.h
-          sed -i 's|int isblank(int c);|// int isblank(int c);|g' build/dash-efi/src/system.h
-          
-          # SOLUCIÓN RADICAL PARA HISTEDIT: Vaciamos por completo el archivo que causa el error
-          # e inyectamos macros vacías para que las funciones que llamen a la edición no rompan
-          cat > build/dash-efi/src/myhistedit.h << 'EOF'
-          #ifndef MYHISTEDIT_H
-          #define MYHISTEDIT_H
-          #define histedit() (void)0
-          #define sethistsize(s) (void)0
-          #define setterm(s) (void)0
-          #endif
-          EOF
-
-          # 4. Copiar tu carpeta 'compat' si existe
-          if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
-          
-          # 5. Crear los stubs de estado necesarios para tu shim
-          cat > build/dash-efi/shstate_stubs.c << 'EOF'
+          # 3. Crear los stubs de estado necesarios para tu shim
+          cat > build/oksh-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include <string.h>
           #include "uefi_process_compat.h"
@@ -80,35 +55,35 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 6. Enlace simbólico del entorno uefi
-          ln -s "$(pwd)/uefi" build/dash-efi/uefi
+          # 4. Enlace simbólico del entorno uefi
+          ln -s "$(pwd)/uefi" build/oksh-efi/uefi
           
-          # 7. Crear el Makefile inyectando flags limpias
-          cat > build/dash-efi/Makefile << 'EOF'
-          TARGET = dash.efi
+          # 5. Generar un Makefile directo y monolítico para oksh
+          # oksh compila listando directamente sus fuentes principales, sin trucos raros.
+          cat > build/oksh-efi/Makefile << 'EOF'
+          TARGET = oksh.efi
           
-          SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
-                 src/eval.c src/exec.c src/expand.c src/input.c \
-                 src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
-                 src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
-                 src/trap.c src/output.c src/var.c \
-                 src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
+          SRCS = alloc.c c_ksh.c c_sh.c c_test.c edit.c emacs.c eval.c exec.c \
+                 expr.c history.c io.c jobs.c lex.c mail.c main.c misc.c \
+                 path.c shf.c syn.c table.c trap.c tree.c tty.c var.c \
+                 version.c vi.c unvis.c vis.c strlcpy.c strlcat.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC \
-                   -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1 \
-                   -UHAVE_LIBEDIT -UWITH_HISTORY
+          # Configuramos las macros de oksh para un entorno estricto sin dependencias de OS (KSH_SMALL)
+          CFLAGS = -I. -DUEFI -D_GNU_SOURCE -fPIC \
+                   -DKSH_SMALL -D_DIRENT_H_ -D_MONOTONIC_clock_gettime \
+                   -D__dead="" -D__RCSID(x)=""
           
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 8. Compilación final monolítica limpia
-          cd build/dash-efi && make
+          # 6. Compilación directa
+          cd build/oksh-efi && make
 
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
-          name: dash-uefi-binary
-          path: build/dash-efi/dash.efi
+          name: oksh-uefi-binary
+          path: build/oksh-efi/oksh.efi
