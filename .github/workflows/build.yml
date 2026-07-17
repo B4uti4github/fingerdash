@@ -33,10 +33,10 @@ jobs:
 
       - name: Prepare and Compile Full Dash with POSIX-UEFI
         run: |
-          # 1. Configuramos deshabilitando explicitamente editline/histedit
+          # 1. Usamos el entorno nativo estándar para generar las tablas internas (.c/.h)
           cd dash-src
           ./autogen.sh
-          ./configure --disable-editline || true
+          ./configure || true
           make || true
           cd ..
 
@@ -44,12 +44,16 @@ jobs:
           mkdir -p build/dash-efi
           cp -r dash-src/* build/dash-efi/
           
-          # Borramos los archivos .o viejos compilados para Linux sin -fPIC
+          # Borramos los archivos .o nativos de Linux
           find build/dash-efi -name "*.o" -type f -delete
           
-          # 3. Parchear quirúrgicamente src/system.h para evitar colisiones con macros del sistema
+          # 3. Parches quirúrgicos a las cabeceras de dash para evitar colisiones
           sed -i 's|#define _SC_CLK_TCK|// #define _SC_CLK_TCK|g' build/dash-efi/src/system.h
           sed -i 's|int isblank(int c);|// int isblank(int c);|g' build/dash-efi/src/system.h
+          
+          # DESACTIVAR EDITLINE/HISTEDIT: Forzamos a que no se use anulando las macros en myhistedit.h
+          sed -i 's|#ifdef HAVE_LIBEDIT|#if 0|g' build/dash-efi/src/myhistedit.h
+          sed -i 's|#ifndef WITH_HISTORY|#if 1|g' build/dash-efi/src/myhistedit.h
 
           # 4. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
@@ -72,7 +76,7 @@ jobs:
           # 6. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 7. Crear el Makefile inyectando flags limpias y quitando histedit.c que ya no se necesita
+          # 7. Crear el Makefile inyectando flags limpias (y asegurando que desactivemos macros heredadas de config.h)
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
@@ -84,8 +88,10 @@ jobs:
                  src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
                  uefi_process_compat.c shstate_stubs.c
           
+          # Agregamos -UHAVE_LIBEDIT y -UWITH_HISTORY en las CFLAGS por si acaso cayeron en config.h
           CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC \
-                   -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1
+                   -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1 \
+                   -UHAVE_LIBEDIT -UWITH_HISTORY
           
           USE_GCC = 1
           
