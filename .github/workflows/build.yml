@@ -54,6 +54,7 @@ jobs:
           # 4. Crear los stubs de estado necesarios para tu shim
           cat > build/dash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
+          #include <string.h>
           #include "uefi_process_compat.h"
           char_t *shstate_get_cwd(void) { return NULL; }
           int shstate_set_cwd(const char_t *cwd) { (void)cwd; return 0; }
