@@ -2,13 +2,9 @@
  * lsh.c — FingerDash Shell for UEFI
  *
  * Compila como fingerdash.efi usando POSIX-UEFI.
- * No fork(), no exec(), no señales. Usa uefi_process_compat
- * para ejecutar otros .efi externos.
  */
 
 #include <uefi.h>
-#include <stdio.h>   /* para EOF */
-#include <string.h>  /* para strcmp, strtok */
 #include "uefi_process_compat.h"
 
 /* ------------------------------------------------------------------ *
@@ -20,7 +16,7 @@ static char *lsh_read_line(void);
 static char **lsh_split_line(char *line);
 
 /* ------------------------------------------------------------------ *
- *  Entry point — POSIX-UEFI calls this main(argc, argv)
+ *  Entry point
  * ------------------------------------------------------------------ */
 int main(int argc, char **argv)
 {
@@ -65,7 +61,7 @@ static int lsh_loop(void)
 }
 
 /* ------------------------------------------------------------------ *
- *  Read a line from stdin (UEFI ConsoleIn)
+ *  Read a line from stdin
  * ------------------------------------------------------------------ */
 static char *lsh_read_line(void)
 {
@@ -78,7 +74,7 @@ static char *lsh_read_line(void)
 
     while (1) {
         c = getchar();
-        if (c == EOF || c == '\n') {
+        if (c == -1 || c == '\n') {   /* EOF en POSIX-UEFI es -1, no la macro EOF */
             buffer[pos] = '\0';
             return buffer;
         }
@@ -98,7 +94,7 @@ static char *lsh_read_line(void)
 }
 
 /* ------------------------------------------------------------------ *
- *  Split line into args (very basic tokenizer)
+ *  Split line into args
  * ------------------------------------------------------------------ */
 static char **lsh_split_line(char *line)
 {
@@ -135,7 +131,6 @@ static int lsh_execute(char **args)
 {
     if (!args || !args[0]) return 1;
 
-    /* Builtins */
     if (strcmp(args[0], "exit") == 0) {
         return 0;
     }
@@ -165,17 +160,15 @@ static int lsh_execute(char **args)
         if (!args[1]) {
             printf("cd: missing argument\n");
         } else {
-            /* UEFI path handling would go here */
             printf("cd: %s (stub)\n", args[1]);
         }
         return 1;
     }
     if (strcmp(args[0], "pwd") == 0) {
-        printf("/\n"); /* stub */
+        printf("/\n");
         return 1;
     }
 
-    /* External command: run another .efi */
     if (strcmp(args[0], "run") == 0) {
         if (!args[1]) {
             printf("run: missing file.efi argument\n");
@@ -194,7 +187,6 @@ static int lsh_execute(char **args)
         return 1;
     }
 
-    /* Unknown command */
     printf("fingerdash: command not found: %s\n", args[0]);
     return 1;
 }
