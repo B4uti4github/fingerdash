@@ -51,9 +51,16 @@ jobs:
           sed -i 's|#define _SC_CLK_TCK|// #define _SC_CLK_TCK|g' build/dash-efi/src/system.h
           sed -i 's|int isblank(int c);|// int isblank(int c);|g' build/dash-efi/src/system.h
           
-          # DESACTIVAR EDITLINE/HISTEDIT: Forzamos a que no se use anulando las macros en myhistedit.h
-          sed -i 's|#ifdef HAVE_LIBEDIT|#if 0|g' build/dash-efi/src/myhistedit.h
-          sed -i 's|#ifndef WITH_HISTORY|#if 1|g' build/dash-efi/src/myhistedit.h
+          # SOLUCIÓN RADICAL PARA HISTEDIT: Vaciamos por completo el archivo que causa el error
+          # e inyectamos macros vacías para que las funciones que llamen a la edición no rompan
+          cat > build/dash-efi/src/myhistedit.h << 'EOF'
+          #ifndef MYHISTEDIT_H
+          #define MYHISTEDIT_H
+          #define histedit() (void)0
+          #define sethistsize(s) (void)0
+          #define setterm(s) (void)0
+          #endif
+          EOF
 
           # 4. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
@@ -76,7 +83,7 @@ jobs:
           # 6. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 7. Crear el Makefile inyectando flags limpias (y asegurando que desactivemos macros heredadas de config.h)
+          # 7. Crear el Makefile inyectando flags limpias
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
@@ -88,7 +95,6 @@ jobs:
                  src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          # Agregamos -UHAVE_LIBEDIT y -UWITH_HISTORY en las CFLAGS por si acaso cayeron en config.h
           CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC \
                    -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1 \
                    -UHAVE_LIBEDIT -UWITH_HISTORY
