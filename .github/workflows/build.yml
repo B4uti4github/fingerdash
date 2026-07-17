@@ -20,7 +20,7 @@ jobs:
       - name: Install cross toolchain (GNU-EFI target deps for POSIX-UEFI)
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 make git autoconf bison flex
+          sudo apt-get install -y gcc-mingw-w64-x86-64 make git autoconf bison flex gcc
 
       - name: Fetch POSIX-UEFI
         run: |
@@ -39,11 +39,18 @@ jobs:
           # 2. Copiamos los archivos de dash
           cp -r dash-src/* build/dash-efi/
           
-          # 3. Copiamos el contenido de tu carpeta 'compat' (uefi_process_compat.c y .h) al directorio raíz de compilación
+          # 3. Copiamos el contenido de tu carpeta 'compat'
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
           
-          # 4. Creamos un puente rápido para los símbolos de estado de dash que falten (los stubs que tenías antes)
-          # Esto evita que falle el enlazador al juntar tu shim con el core de dash.
+          # 4. Generamos los headers dinámicos que dash necesita (syntax.h, nodes.h, token.h, etc.)
+          # Usamos el GCC nativo de Ubuntu porque estos generadores corren en la máquina de build, no en UEFI.
+          cd build/dash-efi
+          gcc -O2 src/mksyntax.c -o mksyntax && ./mksyntax
+          gcc -O2 src/mknodes.c -o mknodes && ./mknodes src/nodes.def
+          gcc -O2 src/mkinit.c -o mkinit && ./mkinit src/alias.c src/cd.c src/error.c src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c src/mystring.c src/options.c src/parser.c src/redir.c src/show.c src/trap.c src/output.c src/var.c > init.c
+          cd ../..
+
+          # 5. Creamos los stubs de estado que requiere tu shim
           cat > build/dash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include <string.h>
@@ -58,29 +65,30 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 5. Enlazamos la carpeta uefi requerida por POSIX-UEFI
+          # 6. Enlazamos la carpeta uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 6. Creamos el Makefile apuntando exactamente a los archivos reales de Dash y a tu archivo compat
+          # 7. Creamos el Makefile apuntando a los fuentes (añadiendo el init.c generado)
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
-          # Fuentes de Dash (buscando en la carpeta src/) + tus archivos de compatibilidad
           SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
                  src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
                  src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
                  src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
                  src/trap.c src/output.c src/var.c \
-                 uefi_process_compat.c shstate_stubs.c
+                 init.c uefi_process_compat.c shstate_stubs.c
           
-          # Añadimos flags para que busque los headers en la raíz y en src/
-          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE
+          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 7. Compilar
+          # Generamos un config.h mínimo vacío para evitar que rompa por faltar macros de entorno POSIX estándar
+          touch build/dash-efi/config.h
+
+          # 8. Compilar
           cd build/dash-efi && make
 
       - name: Upload built .efi
