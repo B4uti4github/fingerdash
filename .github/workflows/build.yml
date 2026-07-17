@@ -33,10 +33,10 @@ jobs:
 
       - name: Prepare and Compile Full Dash with POSIX-UEFI
         run: |
-          # 1. Usamos el entorno nativo para disparar toda la generación de archivos .c/.h internos
+          # 1. Configuramos deshabilitando explicitamente editline/histedit
           cd dash-src
           ./autogen.sh
-          ./configure || true
+          ./configure --disable-editline || true
           make || true
           cd ..
 
@@ -48,7 +48,6 @@ jobs:
           find build/dash-efi -name "*.o" -type f -delete
           
           # 3. Parchear quirúrgicamente src/system.h para evitar colisiones con macros del sistema
-          # Comentamos la redefinición de _SC_CLK_TCK e isblank() que rompen el build de UEFI
           sed -i 's|#define _SC_CLK_TCK|// #define _SC_CLK_TCK|g' build/dash-efi/src/system.h
           sed -i 's|int isblank(int c);|// int isblank(int c);|g' build/dash-efi/src/system.h
 
@@ -73,12 +72,12 @@ jobs:
           # 6. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 7. Crear el Makefile inyectando flags limpias
+          # 7. Crear el Makefile inyectando flags limpias y quitando histedit.c que ya no se necesita
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
           SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
-                 src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
+                 src/eval.c src/exec.c src/expand.c src/input.c \
                  src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
                  src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
                  src/trap.c src/output.c src/var.c \
