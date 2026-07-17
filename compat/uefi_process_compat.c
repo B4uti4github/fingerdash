@@ -10,10 +10,140 @@
 #include "uefi_process_compat.h"
 #include <string.h>
 
-/* POSIX-UEFI exposes these globals: BS (boot services), ST (system table),
- * RT (runtime services), and gImageHandle-equivalent via uefi_image_handle
- * (see uefi.h). Names kept exactly as POSIX-UEFI defines them so this file
- * compiles unmodified against the upstream header. */
+/* POSIX-UEFI exposes these globals:
+ *   BS   (efi_boot_services_t*)   — boot services table
+ *   ST   (efi_system_table_t*)   — system table
+ *   LIP  (efi_loaded_image_protocol_t*) — current image's Loaded Image Protocol
+ *   IM   (efi_handle_t)           — current image handle
+ * All names are exactly as POSIX-UEFI defines them. */
+
+#define UEFI_LOADED_IMAGE_GUID_INIT   \
+    { 0x5B1B31A1, 0x9562, 0x11d2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B} }
+
+/* Device-path node types used by uefi_path_to_dp() */
+#define MEDIA_DEVICE_PATH_TYPE         4
+#define MEDIA_FILEPATH_SUBTYPE         4
+#define END_DEVICE_PATH_TYPE           0x7f
+#define END_ENTIRE_DEVICE_PATH_SUBTYPE 0xff
+
+/* ------------------------------------------------------------------ *
+ *  Internal helpers
+ * ------------------------------------------------------------------ */
+
+/*
+ * Convert a POSIX-style path (e.g. "\\path\\to\\app.efi") into a
+ * UEFI device path.
+ *
+ * UEFI device-path format for a file:
+ *   MEDIA_FILEPATH_DEVICE_PATH node + END_DEVICE_PATH node
+ *
+ * MEDIA_FILEPATH_DEVICE_PATH (Type 4, SubType 4):
+ *   uint8_t  Type      = MEDIA_DEVICE_PATH_TYPE
+ *   uint8_t  SubType   = MEDIA_FILEPATH_SUBTYPE
+ *   uint8_t  Length[2] = little-endian total node size (incl. header)
+ *   char_t   Path[]    = backslash-prefixed path, UEFI-native separator
+ *   char_t   '\0'      = NUL terminator included in node
+ */
+static efi_device_path_t *uefi_path_to_dp(const char_t *path)
+{
+    /* Count bytes we need: two nodes (filepath + end) + path string */
+    size_t plen = 0;
+    const char_t *p;
+
+    if (!path || !*path) return NULL;
+
+    /* Compute length of path in char_t units including leading backslash */
+    for (p = path; *p; p++) plen++;
+
+    /* Allocate: filepath node header (4 bytes) + NUL + end node (4 bytes) */
+    size_t total = 4 + (plen + 1) * sizeof(char_t) + 4;
+    uint8_t *buf = (uint8_t *)malloc(total);
+    if (!buf) return NULL;
+    memset(buf, 0, total);
+
+    /* Fill the MEDIA_FILEPATH node */
+    efi_device_path_t *fp = (efi_device_path_t *)buf;
+    fp->Type    = MEDIA_DEVICE_PATH_TYPE;
+    fp->SubType = MEDIA_FILEPATH_SUBTYPE;
+    uint16_t fp_len = (uint16_t)(4 + (plen + 1) * sizeof(char_t));
+    fp->Length[0] = (uint8_t)(fp_len & 0xff);
+    fp->Length[1] = (uint8_t)((fp_len >> 8) & 0xff);
+
+    /* Copy path as wide chars into the node payload */
+    char_t *dst = (char_t *)(buf + 4);
+    dst[0] = (char_t)'\\';
+    size_t i;
+    for (i = 0; i < plen && i < 1024; i++) {
+        dst[1 + i] = (path[i] == '/') ? (char_t)'\\' : path[i];
+    }
+    dst[1 + i] = 0; /* already zeroed above, being explicit */
+
+    /* Append END_DEVICE_PATH node */
+    efi_device_path_t *end = (efi_device_path_t *)(buf + fp_len + 4);
+    end->Type    = END_DEVICE_PATH_TYPE;
+    end->SubType = END_ENTIRE_DEVICE_PATH_SUBTYPE;
+    end->Length[0] = (uint8_t)(sizeof(efi_device_path_t) & 0xff);
+    end->Length[1] = (uint8_t)((sizeof(efi_device_path_t) >> 8) & 0xff);
+
+    return (efi_device_path_t *)buf;
+}
+
+static void uefi_free_dp(efi_device_path_t *dp)
+{
+    free(dp);
+}
+
+/*
+ * Marshal argv into the LoadOptions blob format UEFI expects:
+ *   uint32_t  argc
+ *   void     *argv[0]  (char16_t* or char* depending on UEFI_NO_UTF8)
+ *   void     *argv[1]
+ *   ...
+ *   NULL
+ *
+ * The blob is allocated with malloc(); caller frees with free().
+ */
+static void *uefi_build_load_options(char_t *const argv[], uintn_t *out_size)
+{
+    int argc = 0;
+    char_t *const *arg;
+    for (arg = argv; arg && *arg; arg++) argc++;
+
+    /* Calculate size: pointer per arg + NULL sentinel + arg strings */
+    size_t ptrs_size = (size_t)(argc + 1) * sizeof(void *);
+    size_t str_size  = 0;
+    for (arg = argv; arg && *arg; arg++) {
+        str_size += (strlen((const char *)*arg) + 1) * sizeof(char_t);
+    }
+
+    size_t total = 4 + ptrs_size + str_size;
+    uint8_t *buf = (uint8_t *)malloc(total);
+    if (!buf) return NULL;
+    memset(buf, 0, total);
+
+    /* Write argc as uint32_t */
+    buf[0] = (uint8_t)(argc & 0xff);
+    buf[1] = (uint8_t)((argc >> 8) & 0xff);
+    buf[2] = (uint8_t)((argc >> 16) & 0xff);
+    buf[3] = (uint8_t)((argc >> 24) & 0xff);
+
+    /* Write pointer table, then string data after it */
+    void **ptrs = (void **)(buf + 4);
+    char_t *str_dst = (char_t *)(buf + 4 + ptrs_size);
+    size_t offset = 0;
+
+    for (int i = 0; i < argc; i++) {
+        ptrs[i] = (void *)(buf + 4 + ptrs_size + offset);
+        const char *src = (const char *)argv[i];
+        size_t len = (strlen(src) + 1) * sizeof(char_t);
+        memcpy(str_dst, src, len);
+        offset += len;
+    }
+    ptrs[argc] = NULL; /* already zeroed */
+
+    *out_size = (uintn_t)total;
+    return buf;
+}
 
 /* ------------------------------------------------------------------ *
  *  1. External command execution: LoadImage + StartImage
@@ -26,9 +156,8 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
     efi_status_t st;
     efi_device_path_t *dp;
     efi_loaded_image_protocol_t *li = NULL;
-    uintn_t exit_size = 0;
-    void   *load_options = NULL;
     uintn_t load_options_size = 0;
+    void *load_options = NULL;
 
     (void)envp; /* UEFI has no per-process env inheritance; POSIX-UEFI
                    emulates getenv/setenv via a global NVRAM-backed table
@@ -37,29 +166,34 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
 
     memset(result, 0, sizeof(*result));
 
-    dp = uefi_path_to_dp(path); /* POSIX-UEFI helper: char_t* -> device path */
+    dp = uefi_path_to_dp(path);
     if (!dp) {
         result->exited = 0;
         return -1;
     }
 
-    st = BS->LoadImage(FALSE, uefi_image_handle, dp, NULL, 0, &child);
+    /* LoadImage: BootPolicy=0, ParentHandle=IM, FilePath=dp,
+     * SourceBuffer=NULL, SourceSize=0, ImageHandle=&child */
+    st = BS->LoadImage(0, IM, dp, NULL, 0, &child);
     uefi_free_dp(dp);
     if (EFI_ERROR(st)) {
-        result->exited = 0;
+        result->exited     = 0;
         result->efi_status = st;
         return -1;
     }
 
-    /* Marshal argv into the LoadOptions blob using POSIX-UEFI's own
-     * convention, so a child built with POSIX-UEFI sees a normal
-     * int argc, char **argv in its main(). */
+    /* Marshal argv into LoadOptions so child sees argc/argv in main() */
     if (argv) {
         load_options = uefi_build_load_options(argv, &load_options_size);
         if (load_options) {
-            st = BS->OpenProtocol(child, &EFI_LOADED_IMAGE_PROTOCOL_GUID,
-                                   (void **)&li, uefi_image_handle, NULL,
-                                   EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+            /* OpenProtocol on the child handle to get its Loaded Image
+             * Protocol instance. POSIX-UEFI's OpenProtocol takes 5 args
+             * (no AgentHandle/ControllerHandle slots). */
+            static const efi_guid_t loaded_image_guid =
+                UEFI_LOADED_IMAGE_GUID_INIT;
+
+            st = BS->OpenProtocol(child, &loaded_image_guid,
+                                  (void **)&li, 0);
             if (!EFI_ERROR(st) && li) {
                 li->LoadOptions     = load_options;
                 li->LoadOptionsSize = (uint32_t)load_options_size;
@@ -67,19 +201,18 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
         }
     }
 
-    /* This is the whole trick: StartImage blocks until the child returns
-     * from its main()/exits, exactly like waitpid() with no WNOHANG.
-     * There is no parent/child race to reason about because there is
-     * only ever one instruction stream. */
-    st = BS->StartImage(child, &exit_size, NULL);
+    /* StartImage blocks until child exits — equivalent to waitpid().
+     * exit_size receives optional ExitData from the child; we ignore it. */
+    st = BS->StartImage(child, NULL, NULL);
+
+    /* POSIX-UEFI doesn't provide UnloadImage as a function pointer in BS.
+     * The child process has already exited at this point (StartImage
+     * returned), so we just release LoadOptions if any. */
+    if (load_options) free(load_options);
 
     result->exited      = 1;
     result->efi_status  = st;
     result->exit_status = EFI_ERROR(st) ? (int)(st & 0xFF) : 0;
-
-    BS->UnloadImage(child);
-    if (load_options) uefi_free(load_options);
-
     return 0;
 }
 
@@ -87,32 +220,27 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
  *  2. Subshell isolation via save/restore, no second address space
  * ------------------------------------------------------------------ */
 
-/* These three hooks are expected to be provided by the dash integration
- * layer (patches/shstate_bridge.c), since only dash knows the concrete
- * shape of its variable table / redirection stack. Kept as weak/extern
- * so this file has no compile-time dependency on dash internals. */
+/* These five hooks are provided by the dash integration layer
+ * (patches/shstate_bridge.c); kept as weak/extern so this file
+ * compiles standalone without dash internals. */
 extern char_t *shstate_get_cwd(void);
-extern int      shstate_set_cwd(const char_t *cwd);
-extern void    *shstate_snapshot_vars(void);
-extern void     shstate_restore_vars(void *snapshot);
-extern void     shstate_free_snapshot(void *snapshot);
+extern int     shstate_set_cwd(const char_t *cwd);
+extern void   *shstate_snapshot_vars(void);
+extern void    shstate_restore_vars(void *snapshot);
+extern void    shstate_free_snapshot(void *snapshot);
 
 void uefi_shell_state_save(uefi_shell_state_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->saved_cwd    = shstate_get_cwd();
     out->saved_vartab = shstate_snapshot_vars();
-    /* fd fields are placeholders for the redirection-stack bridge;
-     * populated by patches/shstate_bridge.c once wired to dash's own
-     * redirect save/restore (dash already has this machinery for its
-     * *builtin* redirection handling -- reuse it, don't reinvent it). */
 }
 
 void uefi_shell_state_restore(const uefi_shell_state_t *saved)
 {
     if (saved->saved_cwd) {
         shstate_set_cwd(saved->saved_cwd);
-        uefi_free(saved->saved_cwd);
+        free(saved->saved_cwd);
     }
     if (saved->saved_vartab) {
         shstate_restore_vars(saved->saved_vartab);
@@ -145,14 +273,14 @@ int uefi_run_subshell(int (*body)(void *ctx), void *ctx,
 
 void uefi_pipe_buf_init(uefi_pipe_buf_t *buf)
 {
-    buf->data = (uint8_t *)uefi_malloc(UEFI_PIPE_INITIAL_CAP);
+    buf->data = (uint8_t *)malloc(UEFI_PIPE_INITIAL_CAP);
     buf->len  = 0;
     buf->cap  = buf->data ? UEFI_PIPE_INITIAL_CAP : 0;
 }
 
 void uefi_pipe_buf_free(uefi_pipe_buf_t *buf)
 {
-    if (buf->data) uefi_free(buf->data);
+    if (buf->data) free(buf->data);
     buf->data = NULL;
     buf->len = buf->cap = 0;
 }
@@ -167,24 +295,21 @@ static int pipe_buf_grow(uefi_pipe_buf_t *buf, uintn_t need)
     new_cap = buf->cap ? buf->cap * 2 : UEFI_PIPE_INITIAL_CAP;
     while (new_cap < buf->len + need) new_cap *= 2;
 
-    new_data = (uint8_t *)uefi_malloc(new_cap);
+    new_data = (uint8_t *)malloc(new_cap);
     if (!new_data) return -1;
 
     if (buf->data) {
         memcpy(new_data, buf->data, buf->len);
-        uefi_free(buf->data);
+        free(buf->data);
     }
     buf->data = new_data;
     buf->cap  = new_cap;
     return 0;
 }
 
-/* These two are provided by the dash integration layer: they redirect
- * the shell's notion of "current stdout" / "current stdin" to write into
- * / read from a uefi_pipe_buf_t instead of a real fd, reusing dash's own
- * existing output-redirection machinery (it already knows how to point
- * its output functions at an arbitrary sink for e.g. command substitution
- * "$(...)" -- a pipe stage is functionally the same problem). */
+/* Provided by the dash integration layer: redirect dash's internal
+ * stdout sink / stdin source to/from a uefi_pipe_buf_t, reusing
+ * dash's existing command-substitution output-redirection machinery. */
 extern int shstate_redirect_stdout_to_buf(uefi_pipe_buf_t *buf);
 extern int shstate_redirect_stdin_from_buf(const uefi_pipe_buf_t *buf);
 extern void shstate_redirect_restore(void);
@@ -222,9 +347,9 @@ int uefi_pipe_stage_feed(int (*consumer)(void *ctx), void *ctx,
     return 0;
 }
 
-/* pipe_buf_grow is used internally by the redirect bridge (not here
- * directly) -- silence unused-function warnings if the bridge isn't
- * linked in yet during incremental builds. */
+/* pipe_buf_grow is called by shstate_bridge.c via extern; silence the
+ * unused-function warning during incremental builds where the bridge
+ * hasn't been linked yet. */
 static void (*_unused_ref)(uefi_pipe_buf_t *, uintn_t) __attribute__((unused)) = pipe_buf_grow;
 
 /* ------------------------------------------------------------------ *
@@ -233,8 +358,8 @@ static void (*_unused_ref)(uefi_pipe_buf_t *, uintn_t) __attribute__((unused)) =
 
 int uefi_bg_unsupported(void)
 {
-    uefi_printf(L"uefi-shell: background jobs / job control are not "
-                 L"supported (no scheduler in this build)\n");
+    printf("uefi-shell: background jobs / job control are not "
+           "supported (no scheduler in this build)\n");
     return -1;
 }
 

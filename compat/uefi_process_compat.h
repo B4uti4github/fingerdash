@@ -20,6 +20,11 @@
  *   - Not signal handling. UEFI Boot Services has no concept of it; the
  *     handful of signal-related calls dash makes are stubbed as no-ops.
  *
+ * POSIX-UEFI GLOBALS USED
+ *   BS   — extern efi_boot_services_t*    (boot services table)
+ *   IM   — extern efi_handle_t             (current image handle)
+ *   LIP  — extern efi_loaded_image_protocol_t* (loaded image of this image)
+ *
  * INTEGRATION MODEL
  *   dash's process creation funnels through a small number of call sites
  *   (mainly jobs.c: forkshell()/forkparent()/forkchild(), and eval.c around
@@ -55,15 +60,15 @@ extern "C" {
  * ------------------------------------------------------------------ */
 
 /* Mirrors just enough of <sys/wait.h> for dash's WIFEXITED/WEXITSTATUS
- * call sites to keep compiling unmodified where possible. */
+ * call sites to keep compiling unmodified. */
 typedef struct {
-    int      exited;      /* always 1 in this model: nothing "signals" */
-    int      exit_status; /* 0-255, matches EFI_STATUS low byte convention */
-    efi_status_t efi_status; /* raw EFI status, for diagnostics */
+    int          exited;      /* always 1 in this model: nothing "signals" */
+    int          exit_status; /* 0-255, matches EFI_STATUS low byte convention */
+    efi_status_t efi_status;  /* raw EFI status, for diagnostics */
 } uefi_proc_result_t;
 
-#define UEFI_WIFEXITED(r)   ((r).exited)
-#define UEFI_WEXITSTATUS(r) ((r).exit_status)
+#define UEFI_WIFEXITED(r)    ((r).exited)
+#define UEFI_WEXITSTATUS(r)  ((r).exit_status)
 
 /* ------------------------------------------------------------------ *
  *  1. External command execution
@@ -73,14 +78,15 @@ typedef struct {
 
 /*
  * Loads `path` (an .efi on a volume reachable via Simple File System
- * Protocol) as a child image and runs it to completion. This is a direct
- * wrapper around BS->LoadImage + BS->StartImage, which is UEFI's own
- * synchronous "run this program and block until it's done" primitive --
- * dash never needs to see that there was no fork() underneath.
+ * Protocol) as a child image and runs it to completion. This wraps
+ * BS->LoadImage + BS->StartImage, which is UEFI's own synchronous
+ * "run this program and block until it's done" primitive -- dash never
+ * needs to know there was no fork() underneath.
  *
- * argv/envp are flattened into the LoadOptions blob StartImage's child
- * reads via EFI_LOADED_IMAGE_PROTOCOL, using POSIX-UEFI's argv marshalling
- * convention so a POSIX-UEFI-built child sees a normal argc/argv.
+ * argv/envp are flattened into the LoadOptions blob the child reads
+ * via its EFI_LOADED_IMAGE_PROTOCOL, using a simple argc/argv blob
+ * (uint32_t argc, void* argv[], NULL sentinel) so a POSIX-UEFI-built
+ * child sees a normal argc/argv in main().
  *
  * Returns 0 on successful load+run (check result->exit_status for the
  * child's actual return code), non-zero if the image could not be loaded
@@ -98,18 +104,14 @@ int uefi_spawn_external(const char_t *path, char_t *const argv[],
 typedef struct {
     char_t *saved_cwd;
     void   *saved_vartab;   /* opaque: shell's variable table, shallow-copied */
-    int     saved_fd_stdin;
-    int     saved_fd_stdout;
-    int     saved_fd_stderr;
 } uefi_shell_state_t;
 
-/* Snapshots the bits of shell state a POSIX subshell is required to
- * change in isolation (cwd, local variables, redirected fds) without
- * affecting the parent. Call before running the subshell's body. */
+/* Snapshots cwd and local variables before a subshell runs so changes
+ * in the subshell don't leak back to the parent. Call before body(). */
 void uefi_shell_state_save(uefi_shell_state_t *out);
 
-/* Restores exactly what was snapshotted. Call after the subshell body
- * returns, regardless of its exit status. */
+/* Restores exactly what was snapshotted. Call after body() returns,
+ * regardless of exit status. */
 void uefi_shell_state_restore(const uefi_shell_state_t *saved);
 
 /*
@@ -131,14 +133,15 @@ int uefi_run_subshell(int (*body)(void *ctx), void *ctx,
 /*
  * NOT a streaming pipe. Because there is no second process to run
  * concurrently, each stage must run to completion before the next stage
- * starts. uefi_pipe_buf_t is an in-memory growable buffer standing in for
- * both ends of a pipe(2) fd pair.
+ * starts. uefi_pipe_buf_t is an in-memory growable buffer standing in
+ * for both ends of a pipe(2) fd pair.
  *
  * Consequence dash/scripts must accept: pipelines that assume streaming
- * concurrency (e.g. "yes | head -1", "tail -f x | grep y") will not behave
- * correctly -- "yes" never terminates, so the buffer never completes and
- * the pipeline hangs. Finite pipelines ("cat f | grep x | sort") work
- * correctly because each stage naturally produces bounded output.
+ * concurrency (e.g. "yes | head -1", "tail -f x | grep y") will not
+ * behave correctly -- "yes" never terminates, so the buffer never
+ * completes and the pipeline hangs. Finite pipelines
+ * ("cat f | grep x | sort") work correctly because each stage
+ * naturally produces bounded output.
  */
 typedef struct {
     uint8_t *data;
@@ -162,13 +165,12 @@ int uefi_pipe_stage_feed(int (*consumer)(void *ctx), void *ctx,
  *     POSIX -- they fail explicitly instead of silently misbehaving.
  * ------------------------------------------------------------------ */
 
-/* Job control ("cmd &", bg, fg, jobs). There is no concurrency to control.
- * Always returns -1 / sets an error dash can surface to the user, e.g.
- * "uefi-shell: job control not supported (no scheduler)". */
+/* Job control ("cmd &", bg, fg, jobs). Always returns -1 / prints an
+ * error so dash surfaces it to the user. */
 int uefi_bg_unsupported(void);
 
-/* Signals: SIGCHLD, SIGINT handler installation, etc. No-ops that report
- * success so dash's setup code doesn't abort, but nothing ever fires one. */
+/* Signals: SIGCHLD, SIGINT handler installation, etc. No-ops that
+ * return success so dash's setup code doesn't abort. */
 int uefi_signal_noop(int signum, void *handler);
 
 #ifdef __cplusplus
