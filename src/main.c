@@ -1,7 +1,5 @@
 /*
  * lsh.c — FingerDash Shell for UEFI
- *
- * Compila como fingerdash.efi usando POSIX-UEFI.
  */
 
 #include <uefi.h>
@@ -34,34 +32,7 @@ int main(int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ *
- *  Main interactive loop
- * ------------------------------------------------------------------ */
-static int lsh_loop(void)
-{
-    char *line;
-    char **args;
-    int status = 1;
-
-    while (status) {
-        printf("fingerdash> ");
-        line = lsh_read_line();
-        if (!line) {
-            printf("\n");
-            break;
-        }
-
-        args = lsh_split_line(line);
-        status = lsh_execute(args);
-
-        free(line);
-        free(args);
-    }
-
-    return 0;
-}
-
-/* ------------------------------------------------------------------ *
- *  Read a line from stdin
+ *  Read a line from UEFI ConsoleIn (teclado real)
  * ------------------------------------------------------------------ */
 static char *lsh_read_line(void)
 {
@@ -70,25 +41,58 @@ static char *lsh_read_line(void)
     char *buffer = (char *)malloc(bufsize);
     if (!buffer) return NULL;
 
-    int c;
+    efi_input_key_t key;
+    efi_status_t status;
 
     while (1) {
-        c = getchar();
-        if (c == -1 || c == '\n') {   /* EOF en POSIX-UEFI es -1, no la macro EOF */
+        /* Esperar a que haya una tecla disponible */
+        status = ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
+        
+        if (EFI_ERROR(status)) {
+            /* No hay tecla, esperar el evento */
+            if (status == EFI_NOT_READY) {
+                /* Esperar el evento de teclado */
+                uintn_t index;
+                BS->WaitForEvent(1, &ST->ConIn->WaitForKey, &index);
+                continue;
+            }
+            /* Error real */
+            free(buffer);
+            return NULL;
+        }
+
+        /* Enter = fin de línea */
+        if (key.UnicodeChar == L'\r' || key.UnicodeChar == L'\n') {
+            printf("\n");
             buffer[pos] = '\0';
             return buffer;
         }
-        buffer[pos] = c;
-        pos++;
 
-        if (pos >= bufsize) {
-            bufsize += 1024;
-            char *newbuf = (char *)realloc(buffer, bufsize);
-            if (!newbuf) {
-                free(buffer);
-                return NULL;
+        /* Backspace */
+        if (key.UnicodeChar == L'\b' || key.ScanCode == 0x08 || key.ScanCode == 0x09) {
+            if (pos > 0) {
+                pos--;
+                printf("\b \b");  /* borrar en pantalla */
             }
-            buffer = newbuf;
+            continue;
+        }
+
+        /* Caracter imprimible */
+        if (key.UnicodeChar != 0 && key.UnicodeChar >= L' ' && key.UnicodeChar < 0x7F) {
+            char ch = (char)key.UnicodeChar;
+            buffer[pos] = ch;
+            pos++;
+            printf("%c", ch);  /* eco en pantalla */
+
+            if (pos >= bufsize - 1) {
+                bufsize += 1024;
+                char *newbuf = (char *)realloc(buffer, bufsize);
+                if (!newbuf) {
+                    free(buffer);
+                    return NULL;
+                }
+                buffer = newbuf;
+            }
         }
     }
 }
@@ -122,6 +126,33 @@ static char **lsh_split_line(char *line)
     }
     tokens[pos] = NULL;
     return tokens;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Main interactive loop
+ * ------------------------------------------------------------------ */
+static int lsh_loop(void)
+{
+    char *line;
+    char **args;
+    int status = 1;
+
+    while (status) {
+        printf("fingerdash> ");
+        line = lsh_read_line();
+        if (!line) {
+            printf("\n");
+            break;
+        }
+
+        args = lsh_split_line(line);
+        status = lsh_execute(args);
+
+        free(line);
+        free(args);
+    }
+
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
