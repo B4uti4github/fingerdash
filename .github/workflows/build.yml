@@ -39,9 +39,9 @@ jobs:
           # StartImage calls resolve, independent of dash's own source
           # (which needs the eval.c/jobs.c redirects described in
           # patches/README.md before it will link against this shim).
-          mkdir -p build/shim-check
-          cp compat/uefi_process_compat.h compat/uefi_process_compat.c build/shim-check/
-          cat > build/shim-check/main.c << 'EOF'
+          mkdir -p build/fingerdash
+          cp compat/uefi_process_compat.h compat/uefi_process_compat.c build/fingerdash/
+          cat > build/fingerdash/main.c << 'EOF'
           #include <uefi.h>
           #include <string.h>
           #include "uefi_process_compat.h"
@@ -63,20 +63,20 @@ jobs:
               return 0;
           }
           EOF
-          cat > build/shim-check/Makefile << 'EOF'
-          TARGET = shimcheck.efi
+          cat > build/fingerdash/Makefile << 'EOF'
+          TARGET = fingerdash.efi
           SRCS = main.c uefi_process_compat.c
           USE_GCC = 1
           include uefi/Makefile
           EOF
-          ln -s "$(pwd)/uefi" build/shim-check/uefi
-          cd build/shim-check && make
+          ln -s "$(pwd)/uefi" build/fingerdash/uefi
+          cd build/fingerdash && make
 
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
-          name: shimcheck-efi
-          path: build/shim-check/shimcheck.efi
+          name: fingerdash-efi
+          path: build/fingerdash/fingerdash.efi
 
       - name: Note on full dash build
         run: |
