@@ -7,13 +7,15 @@
  */
 
 #include <uefi.h>
+#include <stdio.h>   /* para EOF */
+#include <string.h>  /* para strcmp, strtok */
 #include "uefi_process_compat.h"
 
 /* ------------------------------------------------------------------ *
  *  Forward declarations
  * ------------------------------------------------------------------ */
 static int lsh_loop(void);
-static int lsh_execute(char *line);
+static int lsh_execute(char **args);
 static char *lsh_read_line(void);
 static char **lsh_split_line(char *line);
 
@@ -131,7 +133,7 @@ static char **lsh_split_line(char *line)
  * ------------------------------------------------------------------ */
 static int lsh_execute(char **args)
 {
-    if (!args[0]) return 1;
+    if (!args || !args[0]) return 1;
 
     /* Builtins */
     if (strcmp(args[0], "exit") == 0) {
