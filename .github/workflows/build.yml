@@ -44,6 +44,10 @@ jobs:
           mkdir -p build/dash-efi
           cp -r dash-src/* build/dash-efi/
           
+          # ¡CRUCIAL! Borramos los archivos .o viejos compilados para Linux sin -fPIC
+          # Queremos conservar los .c y .h generados (como signames.c, builtins.c, etc.)
+          find build/dash-efi -name "*.o" -type f -delete
+          
           # 3. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
           
@@ -64,27 +68,26 @@ jobs:
           # 5. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 6. Crear el Makefile definitivo inyectando explícitamente -fPIC y agregando builtins.c
+          # 6. Crear el Makefile definitivo añadiendo src/signames.c y forzando la compilación limpia
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
-          # Fuentes core de dash + autogenerados (¡Añadido src/builtins.c!)
+          # Agregamos src/builtins.c y src/signames.c a la compilación nativa de UEFI
           SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
                  src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
                  src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
                  src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
                  src/trap.c src/output.c src/var.c \
-                 src/init.c src/nodes.c src/syntax.c src/builtins.c \
+                 src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          # Añadimos -fPIC obligatoriamente para resolver las relocalizaciones R_X86_64_PC32
           CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 7. Compilación final monolítica
+          # 7. Compilación final monolítica limpia
           cd build/dash-efi && make
 
       - name: Upload built .efi
