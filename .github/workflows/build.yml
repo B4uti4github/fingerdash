@@ -55,11 +55,15 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 4. Enlace simbólico del entorno uefi
+          # 4. Inyectar macros de compatibilidad de OpenBSD directamente en las cabeceras de oksh
+          # De esta forma evitamos pasar paréntesis conflictivos a través del Makefile
+          echo '#define __dead' >> build/oksh-efi/sh.h
+          echo '#define __RCSID(x)' >> build/oksh-efi/sh.h
+
+          # 5. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/oksh-efi/uefi
           
-          # 5. Generar un Makefile directo y monolítico para oksh
-          # oksh compila listando directamente sus fuentes principales, sin trucos raros.
+          # 6. Generar el Makefile sin macros conflictivas en CFLAGS
           cat > build/oksh-efi/Makefile << 'EOF'
           TARGET = oksh.efi
           
@@ -69,17 +73,15 @@ jobs:
                  version.c vi.c unvis.c vis.c strlcpy.c strlcat.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          # Configuramos las macros de oksh para un entorno estricto sin dependencias de OS (KSH_SMALL)
           CFLAGS = -I. -DUEFI -D_GNU_SOURCE -fPIC \
-                   -DKSH_SMALL -D_DIRENT_H_ -D_MONOTONIC_clock_gettime \
-                   -D__dead="" -D__RCSID(x)=""
+                   -DKSH_SMALL -D_DIRENT_H_ -D_MONOTONIC_clock_gettime
           
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 6. Compilación directa
+          # 7. Compilación directa limpia
           cd build/oksh-efi && make
 
       - name: Upload built .efi
