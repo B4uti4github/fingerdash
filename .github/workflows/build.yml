@@ -8,7 +8,7 @@ on:
 
 env:
   POSIX_UEFI_REPO: https://gitlab.com/bztsrc/posix-uefi.git
-  OKSH_REPO: https://github.com/ibara/oksh.git
+  BUSYBOX_REPO: https://github.com/mirror/busybox.git
 
 jobs:
   build:
@@ -27,23 +27,25 @@ jobs:
           git clone --depth 1 "${POSIX_UEFI_REPO}" posix-uefi
           cp -r posix-uefi/uefi ./uefi
 
-      - name: Fetch oksh source
+      - name: Fetch BusyBox (for hush)
         run: |
-          git clone --depth 1 "${OKSH_REPO}" oksh-src
+          git clone --depth 1 "${BUSYBOX_REPO}" busybox-src
 
-      - name: Prepare and Compile oksh with POSIX-UEFI
+      - name: Prepare and Compile hush with POSIX-UEFI
         run: |
-          # 1. Crear directorio de trabajo limpio para el binario UEFI
-          mkdir -p build/oksh-efi
-          cp -r oksh-src/* build/oksh-efi/
+          # 1. Crear directorio de trabajo para hush-efi
+          mkdir -p build/hush-efi
           
-          # 2. Copiar tu carpeta 'compat' si existe
-          if [ -d "compat" ]; then cp -r compat/* build/oksh-efi/; fi
+          # 2. Copiar los archivos fuente esenciales de la shell hush
+          cp busybox-src/shell/hush.c build/hush-efi/
+          cp busybox-src/shell/match.c build/hush-efi/ 2>/dev/null || true
           
-          # 3. Crear los stubs de estado necesarios para tu shim
-          cat > build/oksh-efi/shstate_stubs.c << 'EOF'
+          # 3. Copiar tu carpeta 'compat' si existe
+          if [ -d "compat" ]; then cp -r compat/* build/hush-efi/; fi
+          
+          # 4. Crear los stubs de estado necesarios para tu shim de procesos
+          cat > build/hush-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
-          #include <string.h>
           #include "uefi_process_compat.h"
           char_t *shstate_get_cwd(void) { return NULL; }
           int shstate_set_cwd(const char_t *cwd) { (void)cwd; return 0; }
@@ -55,42 +57,49 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 4. Inyectar macros de compatibilidad de OpenBSD y editores directo en sh.h
-          echo '#define __dead' >> build/oksh-efi/sh.h
-          echo '#define __RCSID(x)' >> build/oksh-efi/sh.h
-          echo '#define EMACS 1' >> build/oksh-efi/sh.h
-          echo '#define VI 1' >> build/oksh-efi/sh.h
-
-          # 5. Generar un pconfig.h vacío para que portable.h deje de quejarse
-          touch build/oksh-efi/pconfig.h
+          # 5. Crear un archivo de cabecera sintético para desactivar las dependencias complejas de Linux
+          cat > build/hush-efi/busybox.h << 'EOF'
+          #ifndef BUSYBOX_H
+          #define BUSYBOX_H 1
+          
+          #define ENABLE_HUSH 1
+          #define ENABLE_HUSH_INTERACTIVE 1
+          #define ENABLE_HUSH_JOB 0
+          #define ENABLE_HUSH_FAST 1
+          
+          #include <stdint.h>
+          #include <stdlib.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <unistd.h>
+          
+          #define barrier() __asm__ __volatile__("": : :"memory")
+          
+          #endif
+          EOF
 
           # 6. Enlace simbólico del entorno uefi
-          ln -s "$(pwd)/uefi" build/oksh-efi/uefi
+          ln -s "$(pwd)/uefi" build/hush-efi/uefi
           
-          # 7. Crear el Makefile monolítico con las flags de descarte necesarias
-          cat > build/oksh-efi/Makefile << 'EOF'
-          TARGET = oksh.efi
+          # 7. Crear el Makefile standalone para hush.efi
+          cat > build/hush-efi/Makefile << 'EOF'
+          TARGET = hush.efi
           
-          SRCS = alloc.c c_ksh.c c_sh.c c_test.c edit.c emacs.c eval.c exec.c \
-                 expr.c history.c io.c jobs.c lex.c mail.c main.c misc.c \
-                 path.c shf.c syn.c table.c trap.c tree.c tty.c var.c \
-                 version.c vi.c unvis.c vis.c strlcpy.c strlcat.c \
-                 uefi_process_compat.c shstate_stubs.c
+          SRCS = hush.c uefi_process_compat.c shstate_stubs.c
           
           CFLAGS = -I. -DUEFI -D_GNU_SOURCE -fPIC \
-                   -DKSH_SMALL -D_DIRENT_H_ -D_MONOTONIC_clock_gettime \
-                   -DHAVE_CONFIG_H
+                   -DBB_VER='"1.37.0-uefi"' -DAUTOCONF_TIMESTAMP='""'
           
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 8. Compilación directa limpia
-          cd build/oksh-efi && make
+          # 8. Compilación limpia directa
+          cd build/hush-efi && make
 
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
-          name: oksh-uefi-binary
-          path: build/oksh-efi/oksh.efi
+          name: hush-uefi-binary
+          path: build/hush-efi/hush.efi
