@@ -33,27 +33,21 @@ jobs:
 
       - name: Prepare and Compile Full Dash with POSIX-UEFI
         run: |
-          # 1. Usamos el entorno nativo de dash para que autogenere TODOS los headers correctamente
+          # 1. Usamos el entorno nativo para disparar toda la generación de archivos .c/.h internos
           cd dash-src
           ./autogen.sh
-          ./configure || true  # El configure fallará o pasará, pero genera los archivos temporales de build
-          make || true         # Forzamos un make inicial; fallará al final por arquitectura, pero creará token.h, syntax.h, init.c, etc.
+          ./configure || true
+          make || true
           cd ..
 
-          # 2. Creamos el directorio de trabajo unificado para UEFI
+          # 2. Directorio de trabajo UEFI
           mkdir -p build/dash-efi
-          
-          # 3. Copiamos todos los archivos generados y fuentes de dash
           cp -r dash-src/* build/dash-efi/
           
-          # Mover archivos autogenerados que caen en src/ a la raíz si es necesario, o viceversa
-          # (dash suele escupirlos en el mismo directorio de compilación)
-          find build/dash-efi -name "syntax.h" -o -name "token.h" -o -name "nodes.h" -o -name "init.c"
-          
-          # 4. Copiamos el contenido de tu carpeta 'compat'
+          # 3. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
           
-          # 5. Creamos los stubs de estado que requiere tu shim
+          # 4. Crear los stubs de estado necesarios para tu shim
           cat > build/dash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include "uefi_process_compat.h"
@@ -67,30 +61,30 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 6. Enlazamos la carpeta uefi
+          # 5. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 7. Creamos el Makefile definitivo apuntando a los fuentes nativos y generados
+          # 6. Crear el Makefile definitivo inyectando explícitamente -fPIC y agregando builtins.c
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
-          # Fuentes core de dash + archivos generados (init.c, nodes.c, syntax.c)
+          # Fuentes core de dash + autogenerados (¡Añadido src/builtins.c!)
           SRCS = src/alias.c src/arith_yacc.c src/arith_yylex.c src/cd.c src/error.c \
                  src/eval.c src/exec.c src/expand.c src/histedit.c src/input.c \
                  src/jobs.c src/mail.c src/main.c src/memalloc.c src/miscbltin.c \
                  src/mystring.c src/options.c src/parser.c src/redir.c src/show.c \
                  src/trap.c src/output.c src/var.c \
-                 src/init.c src/nodes.c src/syntax.c \
+                 src/init.c src/nodes.c src/syntax.c src/builtins.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          # Añadimos flags de inclusión para buscar tanto en la raíz de build como en src/
-          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H
+          # Añadimos -fPIC obligatoriamente para resolver las relocalizaciones R_X86_64_PC32
+          CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 8. Compilar finalmente usando la herramienta de POSIX-UEFI
+          # 7. Compilación final monolítica
           cd build/dash-efi && make
 
       - name: Upload built .efi
