@@ -1,4 +1,4 @@
-name: build
+name: Build FingerDash UEFI
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 
 env:
   POSIX_UEFI_REPO: https://gitlab.com/bztsrc/posix-uefi.git
-  BUSYBOX_REPO: https://github.com/mirror/busybox.git
 
 jobs:
   build:
@@ -27,23 +26,18 @@ jobs:
           git clone --depth 1 "${POSIX_UEFI_REPO}" posix-uefi
           cp -r posix-uefi/uefi ./uefi
 
-      - name: Fetch BusyBox (for hush)
+      - name: Prepare and Compile lsh with POSIX-UEFI
         run: |
-          git clone --depth 1 "${BUSYBOX_REPO}" busybox-src
-
-      - name: Prepare and Compile hush with POSIX-UEFI
-        run: |
-          # 1. Crear directorio de trabajo para hush-efi
-          mkdir -p build/hush-efi
+          # 1. Crear directorio de trabajo para fingerdash-efi
+          mkdir -p build/fingerdash-efi
           
-          # 2. Copiar los archivos fuente esenciales de la shell hush
-          cp busybox-src/shell/hush.c build/hush-efi/
+          # 2. Copiar los archivos fuente de la shell lsh
+          cp src/main.c build/fingerdash-efi/lsh.c
+          cp src/uefi_process_compat.c build/fingerdash-efi/
+          cp src/uefi_process_compat.h build/fingerdash-efi/
           
-          # 3. Copiar tu carpeta 'compat' si existe
-          if [ -d "compat" ]; then cp -r compat/* build/hush-efi/; fi
-          
-          # 4. Crear los stubs de estado necesarios para tu shim de procesos
-          cat > build/hush-efi/shstate_stubs.c << 'EOF'
+          # 3. Crear stubs de estado para el shim de procesos UEFI
+          cat > build/fingerdash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include "uefi_process_compat.h"
           char_t *shstate_get_cwd(void) { return NULL; }
@@ -56,65 +50,27 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 5. Crear un archivo de cabecera sintético para desactivar las dependencias de Linux y Unicode
-          cat > build/hush-efi/busybox.h << 'EOF'
-          #ifndef BUSYBOX_H
-          #define BUSYBOX_H 1
+          # 4. Enlace simbólico del entorno uefi
+          ln -s "$(pwd)/uefi" build/fingerdash-efi/uefi
           
-          #define ENABLE_HUSH 1
-          #define ENABLE_HUSH_INTERACTIVE 1
-          #define ENABLE_HUSH_JOB 0
-          #define ENABLE_HUSH_FAST 1
-          
-          /* Desactivar explícitamente Unicode en BusyBox */
-          #define ENABLE_FEATURE_CHECK_UNICODE_IN_ENV 0
-          #define ENABLE_UNICODE_SUPPORT 0
-          #define ENABLE_UNICODE_USING_LOCALE 0
-          
-          #include <stdint.h>
-          #include <stdlib.h>
-          #include <stdio.h>
-          #include <string.h>
-          #include <unistd.h>
-          
-          #define barrier() __asm__ __volatile__("": : :"memory")
-          
-          #endif
-          EOF
+          # 5. Crear el Makefile standalone para fingerdash.efi
+          cat > build/fingerdash-efi/Makefile << 'EOF'
+          TARGET = fingerdash.efi
 
-          # 6. Crear un unicode.h sintético vacío para saciar el #include "unicode.h"
-          cat > build/hush-efi/unicode.h << 'EOF'
-          #ifndef BB_UNICODE_H
-          #define BB_UNICODE_H 1
-          /* Vacío intencionalmente para compatibilidad UEFI sin dependencias */
-          #define unicode_status 0
-          #define init_unicode() ((void)0)
-          #endif
-          EOF
-
-          # 7. Enlace simbólico del entorno uefi
-          ln -s "$(pwd)/uefi" build/hush-efi/uefi
+          SRCS = lsh.c uefi_process_compat.c shstate_stubs.c
           
-          # 8. Crear el Makefile standalone para hush.efi
-          cat > build/hush-efi/Makefile << 'EOF'
-          TARGET = hush.efi
-          
-          SRCS = hush.c uefi_process_compat.c shstate_stubs.c
-          
-          CFLAGS = -I. -DUEFI -D_GNU_SOURCE -fPIC \
-                   -DBB_VER='"1.37.0-uefi"' -DAUTOCONF_TIMESTAMP='""'
+          CFLAGS = -I. -DUEFI -D_GNU_SOURCE -fPIC
           
           USE_GCC = 1
           
           include uefi/Makefile
           EOF
           
-          # 9. Compilación limpia directa
-          cd build/hush-efi && make
+          # 6. Compilación
+          cd build/fingerdash-efi && make
 
-          
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
-          name: hush-uefi-binary
-          path: build/hush-efi/hush.efi
+          name: fingerdash-uefi-binary
+          path: build/fingerdash-efi/fingerdash.efi
