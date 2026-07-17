@@ -38,7 +38,6 @@ jobs:
           
           # 2. Copiar los archivos fuente esenciales de la shell hush
           cp busybox-src/shell/hush.c build/hush-efi/
-          cp busybox-src/shell/match.c build/hush-efi/ 2>/dev/null || true
           
           # 3. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/hush-efi/; fi
@@ -57,7 +56,7 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 5. Crear un archivo de cabecera sintético para desactivar las dependencias complejas de Linux
+          # 5. Crear un archivo de cabecera sintético para desactivar las dependencias de Linux y Unicode
           cat > build/hush-efi/busybox.h << 'EOF'
           #ifndef BUSYBOX_H
           #define BUSYBOX_H 1
@@ -66,6 +65,11 @@ jobs:
           #define ENABLE_HUSH_INTERACTIVE 1
           #define ENABLE_HUSH_JOB 0
           #define ENABLE_HUSH_FAST 1
+          
+          /* Desactivar explícitamente Unicode en BusyBox */
+          #define ENABLE_FEATURE_CHECK_UNICODE_IN_ENV 0
+          #define ENABLE_UNICODE_SUPPORT 0
+          #define ENABLE_UNICODE_USING_LOCALE 0
           
           #include <stdint.h>
           #include <stdlib.h>
@@ -78,10 +82,20 @@ jobs:
           #endif
           EOF
 
-          # 6. Enlace simbólico del entorno uefi
+          # 6. Crear un unicode.h sintético vacío para saciar el #include "unicode.h"
+          cat > build/hush-efi/unicode.h << 'EOF'
+          #ifndef BB_UNICODE_H
+          #define BB_UNICODE_H 1
+          /* Vacío intencionalmente para compatibilidad UEFI sin dependencias */
+          #define unicode_status 0
+          #define init_unicode() ((void)0)
+          #endif
+          EOF
+
+          # 7. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/hush-efi/uefi
           
-          # 7. Crear el Makefile standalone para hush.efi
+          # 8. Crear el Makefile standalone para hush.efi
           cat > build/hush-efi/Makefile << 'EOF'
           TARGET = hush.efi
           
@@ -95,9 +109,10 @@ jobs:
           include uefi/Makefile
           EOF
           
-          # 8. Compilación limpia directa
+          # 9. Compilación limpia directa
           cd build/hush-efi && make
 
+          
       - name: Upload built .efi
         uses: actions/upload-artifact@v4
         with:
