@@ -218,6 +218,27 @@ static int lsh_execute(char **args)
         return 1;
     }
 
+    if (strncmp(args[0], "./", 2) == 0) {
+        const char *path = args[0] + 2;  /* saltar "./" */
+        
+        /* Si queda vacío, error */
+        if (!path || path[0] == '\0') {
+            printf("./: missing file name\n");
+            return 1;
+        }
+
+        uefi_proc_result_t result;
+        int rc = uefi_spawn_external(path, args + 1, NULL, &result);
+        if (rc != 0) {
+            printf("%s: failed to execute\n", path);
+            return 1;
+        }
+        if (UEFI_WIFEXITED(result)) {
+            printf("%s: exited with status %d\n", path, UEFI_WEXITSTATUS(result));
+        }
+        return 1;
+    }
+
     printf("fingerdash: command not found: %s\n", args[0]);
     return 1;
 }
