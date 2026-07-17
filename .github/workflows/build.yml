@@ -47,10 +47,15 @@ jobs:
           # Borramos los archivos .o viejos compilados para Linux sin -fPIC
           find build/dash-efi -name "*.o" -type f -delete
           
-          # 3. Copiar tu carpeta 'compat' si existe
+          # 3. Parchear quirúrgicamente src/system.h para evitar colisiones con macros del sistema
+          # Comentamos la redefinición de _SC_CLK_TCK e isblank() que rompen el build de UEFI
+          sed -i 's|#define _SC_CLK_TCK|// #define _SC_CLK_TCK|g' build/dash-efi/src/system.h
+          sed -i 's|int isblank(int c);|// int isblank(int c);|g' build/dash-efi/src/system.h
+
+          # 4. Copiar tu carpeta 'compat' si existe
           if [ -d "compat" ]; then cp -r compat/* build/dash-efi/; fi
           
-          # 4. Crear los stubs de estado necesarios para tu shim
+          # 5. Crear los stubs de estado necesarios para tu shim
           cat > build/dash-efi/shstate_stubs.c << 'EOF'
           #include <uefi.h>
           #include <string.h>
@@ -65,10 +70,10 @@ jobs:
           void shstate_redirect_restore(void) {}
           EOF
 
-          # 5. Enlace simbólico del entorno uefi
+          # 6. Enlace simbólico del entorno uefi
           ln -s "$(pwd)/uefi" build/dash-efi/uefi
           
-          # 6. Crear el Makefile inyectando HAVE_* directos en CFLAGS para neutralizar system.h
+          # 7. Crear el Makefile inyectando flags limpias
           cat > build/dash-efi/Makefile << 'EOF'
           TARGET = dash.efi
           
@@ -80,8 +85,6 @@ jobs:
                  src/init.c src/nodes.c src/syntax.c src/builtins.c src/signames.c \
                  uefi_process_compat.c shstate_stubs.c
           
-          # Definimos de manera explícita que ya existen las funciones conflictivas del entorno
-          # Esto bloquea las declaraciones 'static inline' duplicadas de src/system.h
           CFLAGS = -I. -Isrc -DUEFI -D_GNU_SOURCE -DHAVE_CONFIG_H -fPIC \
                    -DHAVE_STRTOD=1 -DHAVE_KILLPG=1 -DHAVE_ISBLANK=1
           
@@ -90,7 +93,7 @@ jobs:
           include uefi/Makefile
           EOF
           
-          # 7. Compilación final monolítica limpia
+          # 8. Compilación final monolítica limpia
           cd build/dash-efi && make
 
       - name: Upload built .efi
